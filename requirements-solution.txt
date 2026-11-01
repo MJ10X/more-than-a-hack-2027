@@ -1,0 +1,8 @@
+# Pinned dependencies for src/ -- the possession model. These exact versions regenerate the
+# submission byte for byte:
+#
+#     pip install -r requirements-solution.txt
+#     python src/run.py
+numpy==2.4.6
+pandas==3.1.0
+scikit-learn==1.5.2
