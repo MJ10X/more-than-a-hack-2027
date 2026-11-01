@@ -16,10 +16,38 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from features import ball_features, half_index, shape_features, smart_tag_priors  # noqa: E402
-from model import decode, emissions, pseudo_labels, shape_log_probs  # noqa: E402
+from model import PARAMS, decode, emissions, pseudo_labels, shape_log_probs  # noqa: E402
 from tracking import load  # noqa: E402
 
 DEFAULT_OUT = os.path.join(ROOT, "evaluation", "results", "possession_hmm.csv")
+
+
+def build_inputs():
+    """Everything decoding needs: ball evidence, shape-model scores, tag priors, halves."""
+    players, ball, team = load()
+    n = len(ball)
+    half = half_index(n)
+    graded = half > 0
+    print("features ...")
+    bf = ball_features(players, ball, team)
+    f_home, f_away, _ = shape_features(players, team, half)
+    tag_vote, setpiece, pre_kickoff = smart_tag_priors(n)
+
+    labels = pseudo_labels(bf, graded, pre_kickoff)
+    print("pseudo-labels on graded frames: H {}  A {}  D {}  none {}".format(
+        *(int(np.sum(labels[graded] == k)) for k in (0, 1, 2, -1))))
+
+    print("shape model ...")
+    shape_lp = shape_log_probs(f_home, f_away, labels, graded)
+    return {"bf": bf, "shape_lp": shape_lp, "tag_vote": tag_vote, "setpiece": setpiece,
+            "pre_kickoff": pre_kickoff, "half": half, "pseudo": labels}
+
+
+def predict(inputs, p=PARAMS, bf=None):
+    """Labels for every frame. `bf` overrides the ball evidence (used by the masked-ball test)."""
+    score = emissions(inputs["shape_lp"], bf if bf is not None else inputs["bf"],
+                      inputs["tag_vote"], inputs["setpiece"], inputs["pre_kickoff"], p)
+    return decode(score, inputs["half"], p)
 
 
 def spells(labels):
@@ -31,34 +59,23 @@ def spells(labels):
     return int(poss.sum()), float(lengths[poss].mean() / 25.0) if poss.any() else 0.0
 
 
+def write_submission(path, labels):
+    with open(path, "w") as handle:
+        handle.write("frame,label\n")
+        handle.writelines("{},{}\n".format(i, lab) for i, lab in enumerate(labels))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default=DEFAULT_OUT)
     args = parser.parse_args()
     t0 = time.time()
 
-    players, ball, team = load()
-    n = len(ball)
-    half = half_index(n)
-    graded = half > 0
-    print("features ...")
-    bf = ball_features(players, ball, team)
-    f_home, f_away, _ = shape_features(players, team, half)
-    tag_vote, setpiece = smart_tag_priors(n)
+    inputs = build_inputs()
+    pred = predict(inputs)
+    write_submission(args.out, pred)
 
-    labels = pseudo_labels(bf, graded)
-    print("pseudo-labels on graded frames: H {}  A {}  D {}  none {}".format(
-        *(int(np.sum(labels[graded] == k)) for k in (0, 1, 2, -1))))
-
-    print("shape model ...")
-    shape_lp = shape_log_probs(f_home, f_away, labels, graded)
-    pred = decode(emissions(shape_lp, bf, tag_vote, setpiece), half)
-
-    with open(args.out, "w") as handle:
-        handle.write("frame,label\n")
-        handle.writelines("{},{}\n".format(i, lab) for i, lab in enumerate(pred))
-
-    g = pred[graded]
+    g = pred[inputs["half"] > 0]
     count, mean_s = spells(g)
     print("graded: H {:.1%}  A {:.1%}  D {:.1%}   {} possessions, mean {:.1f} s".format(
         np.mean(g == "H"), np.mean(g == "A"), np.mean(g == "D"), count, mean_s))
