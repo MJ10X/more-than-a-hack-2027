@@ -92,8 +92,8 @@ def rolling_mean(x, half_window):
         return (cs[hi] - cs[lo]) / (cn[hi] - cn[lo])
 
 
-def ball_features(players, ball, team, game=GAME):
-    length, width = GAMES[game]["pitch"]
+def ball_features(players, ball, team, pitch=None):
+    length, width = pitch or GAMES[GAME]["pitch"]
     b = interpolate_ball(ball)
     dist = np.linalg.norm(players[..., :2] - b[:, None, :], axis=2)
     with warnings.catch_warnings():
@@ -169,14 +169,15 @@ def _free_space(players, own_mask, opp_mask, chunk=20000):
     return out
 
 
-def shape_features(players, team, half, game=GAME):
+def shape_features(players, team, half, sign=None, pitch=None):
     """(features_home_view, features_away_view, names).
 
     Each view is [own team stats, opponent stats, pairwise], so the row for "home has the ball"
     and the row for "away has the ball" share one model.
     """
-    length = GAMES[game]["pitch"][0]
-    sign = attack_sign(half)
+    length = (pitch or GAMES[GAME]["pitch"])[0]
+    if sign is None:
+        sign = attack_sign(half)
     home = _team_stats(players, team == HOME, sign, length)
     away = _team_stats(players, team == AWAY, -sign, length)
     home["free"] = _free_space(players, team == HOME, team == AWAY)

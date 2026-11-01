@@ -16,22 +16,32 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from features import ball_features, half_index, shape_features, smart_tag_priors  # noqa: E402
-from model import PARAMS, decode, emissions, pseudo_labels, shape_log_probs  # noqa: E402
+from model import PARAMS, decode, emissions, pseudo_labels, shape_log_probs, snap_transitions  # noqa: E402
 from tracking import load  # noqa: E402
 
 DEFAULT_OUT = os.path.join(ROOT, "evaluation", "results", "possession_hmm.csv")
 
 
 def build_inputs():
-    """Everything decoding needs: ball evidence, shape-model scores, tag priors, halves."""
+    """Everything decoding needs for the challenge match: tracking plus its Smart Tagging."""
     players, ball, team = load()
+    half = half_index(len(ball))
+    return build_inputs_from(players, ball, team, half, tags=smart_tag_priors(len(ball)))
+
+
+def build_inputs_from(players, ball, team, half, sign=None, pitch=None, tags=None):
+    """Ball evidence, shape-model scores, tag priors and halves for any game.
+
+    `tags` is (team_vote, setpiece_team, pre_kickoff); a game without Smart Tagging gets none.
+    """
     n = len(ball)
-    half = half_index(n)
     graded = half > 0
     print("features ...")
-    bf = ball_features(players, ball, team)
-    f_home, f_away, _ = shape_features(players, team, half)
-    tag_vote, setpiece, pre_kickoff = smart_tag_priors(n)
+    bf = ball_features(players, ball, team, pitch)
+    f_home, f_away, _ = shape_features(players, team, half, sign, pitch)
+    if tags is None:
+        tags = (np.zeros(n, np.float32), np.full(n, -1, np.int8), np.zeros(n, bool))
+    tag_vote, setpiece, pre_kickoff = tags
 
     labels = pseudo_labels(bf, graded, pre_kickoff)
     print("pseudo-labels on graded frames: H {}  A {}  D {}  none {}".format(
@@ -47,7 +57,9 @@ def predict(inputs, p=PARAMS, bf=None):
     """Labels for every frame. `bf` overrides the ball evidence (used by the masked-ball test)."""
     score = emissions(inputs["shape_lp"], bf if bf is not None else inputs["bf"],
                       inputs["tag_vote"], inputs["setpiece"], inputs["pre_kickoff"], p)
-    return decode(score, inputs["half"], p)
+    bf = bf if bf is not None else inputs["bf"]
+    labels = decode(score, inputs["half"], p)
+    return snap_transitions(labels, bf, p)
 
 
 def spells(labels):

@@ -32,22 +32,27 @@ QUIET_SPEED = 0.8        # m/s, median player speed (+/-2 s) of a stoppage taken
 QUIET_MIN = 5 * FPS      # ... sustained this long, with the ball missing or still
 
 # Emission weights and Viterbi costs. One dict, so a sweep can override any of them.
+# Weights marked (tuned) were tuned on Metrica's public sample games -- other matches, with
+# event-derived labels and the ball noised to match this match's tracking -- by
+# src/external/tune.py. Nothing here was tuned on this match.
 PARAMS = {
-    "w_shape": 0.15,          # shape-model log-probabilities are highly correlated frame to frame
-    "w_ctrl": 1.0,            # a player on the ball, per frame
+    "w_shape": 0.075,         # shape-model log-probabilities, per frame (tuned)
+    "w_ctrl": 1.4,            # a player on the ball, per frame (tuned)
     "ctrl_radius": 2.5,       # m, how close counts as on the ball for that evidence
     "w_out": 2.0,             # ball outside the pitch, per frame
     "w_moving": 0.5,          # ball moving in play, against D, per frame
     "moving_speed": 3.0,      # m/s, +/-0.5 s average
     "w_still": 0.5,           # ball still in play, for D, per frame
     "still_speed": 0.7,       # m/s, +/-0.5 s average
-    "w_slow_missing": 0.5,    # ball not seen and players walking, per frame at zero speed
+    "w_slow_missing": 2.8,    # ball not seen and players walking, per frame at zero speed (tuned)
     "slow_speed": 1.2,        # m/s, median player speed (+/-2 s) below which play looks stopped
     "w_kickoff": 3.0,         # certain stoppage before a kick-off, per frame
     "w_tag": 0.02,            # Smart Tagging phase vote, per frame per tag
     "w_setpiece": 0.03,       # Smart Tagging set-piece team, per frame
     "switch_cost": 6.0,       # H <-> A
     "dead_cost": 8.0,         # live <-> D
+    "snap_window": 26,        # frames, +/- around a hand-over searched for the touch (tuned)
+    "snap_radius": 1.0,       # m, a player this close to the ball is touching it
 }
 
 STATES = np.array(["H", "A", "D"])
@@ -152,8 +157,9 @@ def shape_log_probs(f_home, f_away, labels, graded):
         X = np.concatenate([f_home[train], f_away[train]])
         y = np.concatenate([y_home[train], y_away[train]])
         clf = _new_classifier().fit(X, y)
-        p_home[block] = clf.predict_proba(f_home[block])
-        p_away[block] = clf.predict_proba(f_away[block])
+        # Columns by class id, so a fold that saw no dead-ball rows still lines up.
+        p_home[np.ix_(block, clf.classes_)] = clf.predict_proba(f_home[block])
+        p_away[np.ix_(block, clf.classes_)] = clf.predict_proba(f_away[block])
         held = block[y_home[block] >= 0]
         acc = np.mean(clf.predict(f_home[held]) == y_home[held]) if len(held) else float("nan")
         print("  fold {}: trained on {} rows, held-out pseudo-label accuracy {:.3f}".format(
@@ -235,3 +241,39 @@ def decode(score, half, p=PARAMS):
         idx = np.where(half == h)[0]
         labels[idx] = STATES[viterbi(score[idx], p["switch_cost"], p["dead_cost"])]
     return labels
+
+
+def snap_transitions(labels, bf, p=PARAMS):
+    """Move each H <-> A boundary onto the frame the new team actually reaches the ball.
+
+    Viterbi places a hand-over wherever the accumulated evidence tips, which is usually a few
+    frames after the touch. Within +/- snap_window of each predicted hand-over, the boundary moves
+    to the first frame where a player of the new team is within snap_radius of the visible ball and
+    nearer than any opponent. No such frame, no move.
+    """
+    if p["snap_window"] <= 0:
+        return labels
+    out = labels.copy()
+    live = bf["visible"] & ~bf["out"]
+    with np.errstate(invalid="ignore"):
+        home_touch = live & (bf["d_home"] < p["snap_radius"]) & (bf["d_home"] < bf["d_away"])
+        away_touch = live & (bf["d_away"] < p["snap_radius"]) & (bf["d_away"] < bf["d_home"])
+    w = int(p["snap_window"])
+    change = np.where((labels[1:] != labels[:-1]) & np.isin(labels[1:], ["H", "A"])
+                      & np.isin(labels[:-1], ["H", "A"]))[0] + 1
+    for t in change:
+        new, old = labels[t], labels[t - 1]
+        touch = home_touch if new == "H" else away_touch
+        lo, hi = max(0, t - w), min(len(labels), t + w + 1)
+        # Stay inside the two spells being adjusted.
+        hits = [f for f in np.where(touch[lo:hi])[0] + lo
+                if np.all(np.isin(labels[min(f, t):max(f, t)], [new, old]))]
+        if not hits:
+            continue
+        f = hits[0]
+        if f < t:
+            out[f:t] = new
+        elif f > t:
+            out[t:f] = old
+    return out
+
